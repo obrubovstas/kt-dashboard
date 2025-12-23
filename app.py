@@ -183,18 +183,26 @@ def load_conversions(file):
 
     st.write(f"🧪 conversions aggregated rows: {len(merged):,}")
 
-    with engine.begin() as conn:
-        conn.execute(
-            text("""
+        with engine.begin() as conn:
+        st.write("🧪 before TRUNCATE conv staging")
+        conn.execute(text("truncate staging_conversions_daily;"))
+        st.write("🧪 after TRUNCATE conv staging")
+
+        st.write("🧪 before COPY conv to staging")
+        copy_df_to_table(conn, merged[["day", "subid", "leads", "sales"]], "staging_conversions_daily")
+        st.write("🧪 after COPY conv to staging")
+
+        st.write("🧪 before MERGE conv to fact")
+        conn.execute(text("""
             insert into fact_conversions_daily(day, subid, leads, sales)
-            values (:day, :subid, :leads, :sales)
+            select day, subid, leads, sales
+            from staging_conversions_daily
             on conflict (day, subid)
             do update set
               leads = excluded.leads,
-              sales = excluded.sales
-            """),
-            merged.to_dict("records")
-        )
+              sales = excluded.sales;
+        """))
+        st.write("🧪 after MERGE conv to fact")
 
     st.write("🎉 conversions загружены")
 
