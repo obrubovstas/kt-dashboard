@@ -14,7 +14,7 @@ def get_engine():
 engine = get_engine()
 
 def read_csv_ru(f):
-    return pd.read_csv(f, sep=";", encoding="utf-8", engine="python")
+    return pd.read_csv(f, sep=";", encoding="utf-8-sig", engine="python")
 
 # ---------- LOADERS ----------
 
