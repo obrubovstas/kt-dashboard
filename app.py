@@ -132,10 +132,10 @@ def load_conversions(file):
 
     subid_col = pick_col(df, ["Subid", "SubId", "subid", "SUBID"])
     status_col = pick_col(df, ["Ориг. статус", "Orig. status", "Orig status", "Status"])
-    conv_time_col = pick_col(df, ["Время конверсии", "Conversion time", "Time conversion"])
+    conv_time_col = pick_col(df, ["Время конверсии", "Conversion time"])
+
     sale_time_col = None
-    # "Время продажи" иногда отсутствует — нормально
-    for cand in ["Время продажи", "Sale time", "Time sale"]:
+    for cand in ["Время продажи", "Sale time"]:
         try:
             sale_time_col = pick_col(df, [cand])
             break
@@ -177,34 +177,39 @@ def load_conversions(file):
 
     merged = (
         pd.merge(leads, sales, on=["day", "subid"], how="outer")
-          .fillna(0)
-          .astype({"leads": int, "sales": int})
+        .fillna(0)
+        .astype({"leads": int, "sales": int})
     )
 
     st.write(f"🧪 conversions aggregated rows: {len(merged):,}")
 
+    # 🔽 ВАЖНО: этот with НА ТОМ ЖЕ УРОВНЕ, что и merged
     with engine.begin() as conn:
-    st.write("🧪 before TRUNCATE conv staging")
-    conn.execute(text("truncate staging_conversions_daily;"))
-    st.write("🧪 after TRUNCATE conv staging")
+        st.write("🧪 before TRUNCATE conv staging")
+        conn.execute(text("truncate staging_conversions_daily;"))
+        st.write("🧪 after TRUNCATE conv staging")
 
-    st.write("🧪 before COPY conv to staging")
-    copy_df_to_table(conn, merged[["day", "subid", "leads", "sales"]], "staging_conversions_daily")
-    st.write("🧪 after COPY conv to staging")
+        st.write("🧪 before COPY conv to staging")
+        copy_df_to_table(
+            conn,
+            merged[["day", "subid", "leads", "sales"]],
+            "staging_conversions_daily"
+        )
+        st.write("🧪 after COPY conv to staging")
 
-    st.write("🧪 before MERGE conv to fact")
-    conn.execute(text("""
-        insert into fact_conversions_daily(day, subid, leads, sales)
-        select day, subid, leads, sales
-        from staging_conversions_daily
-        on conflict (day, subid)
-        do update set
-            leads = excluded.leads,
-            sales = excluded.sales;
-    """))
-    st.write("🧪 after MERGE conv to fact")
+        st.write("🧪 before MERGE conv to fact")
+        conn.execute(text("""
+            insert into fact_conversions_daily(day, subid, leads, sales)
+            select day, subid, leads, sales
+            from staging_conversions_daily
+            on conflict (day, subid)
+            do update set
+              leads = excluded.leads,
+              sales = excluded.sales;
+        """))
+        st.write("🧪 after MERGE conv to fact")
 
-st.write("🎉 conversions загружены")
+    st.write("🎉 conversions загружены")
 
 # ---------------- UI ----------------
 st.title("📊 KT dashboard")
