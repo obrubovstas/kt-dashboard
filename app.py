@@ -32,53 +32,73 @@ def pick_col(df, candidates):
     raise KeyError(f"Не найдена ни одна из колонок: {candidates}. Фактические колонки: {list(df.columns)}")
 
 def load_clicks(file):
-    st.write("🧩 start load_clicks")  # маркер, должен появиться мгновенно
+    st.write("🧩 start load_clicks")
 
     df_iter = pd.read_csv(
         file,
         sep=";",
         encoding="utf-8-sig",
         engine="python",
-        chunksize=200_000
+        chunksize=150_000  # чуть меньше, чтобы стабильнее
     )
-
-    st.write("🧩 csv iterator created")  # тоже должен появиться быстро
+    st.write("🧩 csv iterator created")
 
     total_rows = 0
     chunks_done = 0
+    progress = st.progress(0)
 
-    for chunk in df_iter:
-        chunks_done += 1
+    def batched(records, batch_size=2000):
+        for i in range(0, len(records), batch_size):
+            yield records[i:i+batch_size]
 
-        time_col = pick_col(chunk, ["Время клика", "Дата и время"])
-        subid_col = pick_col(chunk, ["Subid", "SubId", "subid", "SUBID"])
+    # ВАЖНО: выполняем много маленьких execute вместо одного огромного
+    upsert_sql = text("""
+        insert into fact_clicks_daily(day, subid, clicks)
+        values (:day, :subid, :clicks)
+        on conflict (day, subid)
+        do update set clicks = fact_clicks_daily.clicks + excluded.clicks
+    """)
 
-        chunk["day"] = pd.to_datetime(chunk[time_col], errors="coerce").dt.date
-        chunk["subid"] = chunk[subid_col].astype(str)
+    with engine.begin() as conn:
+        for chunk in df_iter:
+            chunks_done += 1
 
-        agg = (
-            chunk.dropna(subset=["day", "subid"])
-                 .groupby(["day", "subid"])
-                 .size()
-                 .reset_index(name="clicks")
-        )
+            time_col = pick_col(chunk, ["Время клика", "Дата и время"])
+            subid_col = pick_col(chunk, ["Subid", "SubId", "subid", "SUBID"])
 
-        if not agg.empty:
-            with engine.begin() as conn:
-                conn.execute(
-                    text("""
-                    insert into fact_clicks_daily(day, subid, clicks)
-                    values (:day, :subid, :clicks)
-                    on conflict (day, subid)
-                    do update set clicks = fact_clicks_daily.clicks + excluded.clicks
-                    """),
-                    agg.to_dict("records")
-                )
+            chunk["day"] = pd.to_datetime(chunk[time_col], errors="coerce").dt.date
+            chunk["subid"] = chunk[subid_col].astype(str)
 
-        total_rows += len(chunk)
-        st.write(f"⬆️ chunk #{chunks_done}: обработано строк кликов: {total_rows:,}")
+            agg = (
+                chunk.dropna(subset=["day", "subid"])
+                     .groupby(["day", "subid"])
+                     .size()
+                     .reset_index(name="clicks")
+            )
 
-    st.write(f"✅ clicks загружены, всего строк: {total_rows:,}")
+            total_rows += len(chunk)
+
+            # ✅ прогресс показываем ДО вставки
+            st.write(f"⬆️ chunk #{chunks_done}: прочитал {total_rows:,} строк, готовлю {len(agg):,} upsert-строк…")
+
+            if agg.empty:
+                continue
+
+            records = agg.to_dict("records")
+
+            # ✅ пишем порциями
+            batches = 0
+            for b in batched(records, batch_size=2000):
+                conn.execute(upsert_sql, b)
+                batches += 1
+
+            st.write(f"✅ chunk #{chunks_done}: записано {len(records):,} строк в {batches} батчах")
+
+            # прогресс-бар “по ощущениям” (поскольку точного total строк мы не знаем заранее)
+            progress.progress(min(0.99, chunks_done / 20))
+
+    progress.progress(1.0)
+    st.write(f"🎉 clicks загружены, всего исходных строк: {total_rows:,}")
 
 def load_conversions(file):
     df = read_csv_ru(file)
