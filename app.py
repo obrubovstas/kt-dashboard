@@ -279,8 +279,13 @@ if df.empty:
     st.info("Загрузи CSV файлы — появится дашборд.")
     st.stop()
 
-last_day = df["day"].max()
-prev_day = df[df["day"] < last_day]["day"].max()
+import datetime as dt
+
+today = dt.date.today()
+last_day = today - dt.timedelta(days=1)  # вчера
+prev_day = last_day - dt.timedelta(days=1)  # позавчера
+
+st.write("Дни в базе:", sorted(df["day"].unique()))
 
 k1, k2, k3 = st.columns(3)
 k1.metric("Продажи", int(df[df.day == last_day].sales.sum()))
