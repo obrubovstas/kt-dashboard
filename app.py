@@ -232,3 +232,11 @@ if prev_day:
     )
 
     st.dataframe(growth, use_container_width=True)
+
+st.write("🧪 before TRUNCATE")
+conn.execute(text("truncate staging_clicks_daily;"))
+st.write("🧪 after TRUNCATE, before to_sql")
+agg.to_sql(... )
+st.write("🧪 after to_sql, before merge")
+conn.execute(text("""insert into fact..."""))
+st.write("🧪 after merge")
