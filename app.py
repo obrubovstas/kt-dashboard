@@ -1,3 +1,5 @@
+import io
+import csv
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
@@ -30,6 +32,25 @@ def pick_col(df, candidates):
         if key in lowered:
             return lowered[key]
     raise KeyError(f"Не найдена ни одна из колонок: {candidates}. Фактические колонки: {list(df.columns)}")
+
+def copy_df_to_table(conn, df: pd.DataFrame, table: str):
+    """
+    COPY df -> table (Postgres) через psycopg2 copy_expert.
+    conn здесь SQLAlchemy connection (внутри engine.begin()).
+    """
+    # SQLAlchemy connection -> raw psycopg2 connection
+    raw = conn.connection
+    cur = raw.cursor()
+
+    buf = io.StringIO()
+    df.to_csv(buf, index=False, header=False)  # без заголовка
+    buf.seek(0)
+
+    cols = ",".join(df.columns)
+    sql = f"COPY {table} ({cols}) FROM STDIN WITH (FORMAT CSV)"
+
+    cur.copy_expert(sql, buf)
+    cur.close()
 
 def load_clicks(file):
     st.write("🧩 start load_clicks")
@@ -70,14 +91,16 @@ def load_clicks(file):
             if agg.empty:
                 continue
 
-            # 1) чистим staging под этот chunk (быстро)
+            # 1) очистка staging
             conn.execute(text("truncate staging_clicks_daily;"))
+            st.write("🧪 staging truncated")
 
-            # 2) грузим agg в staging самым быстрым способом для SQLAlchemy — to_sql multi rows
-            #    (для Neon это обычно быстрее чем тысячи upsert’ов)
-            agg.to_sql("staging_clicks_daily", con=conn, if_exists="append", index=False, method="multi", chunksize=5000)
+            # 2) COPY в staging (самый быстрый путь)
+            # важно: колонки должны совпасть с таблицей
+            copy_df_to_table(conn, agg[["day", "subid", "clicks"]], "staging_clicks_daily")
+            st.write("🧪 copied to staging")
 
-            # 3) одним запросом мержим staging -> факт (и суммируем clicks)
+            # 3) merge в факт
             conn.execute(text("""
                 insert into fact_clicks_daily(day, subid, clicks)
                 select day, subid, clicks
@@ -85,8 +108,8 @@ def load_clicks(file):
                 on conflict (day, subid)
                 do update set clicks = fact_clicks_daily.clicks + excluded.clicks;
             """))
+            st.write(f"✅ chunk #{chunks_done}: merged в fact")
 
-            st.write(f"✅ chunk #{chunks_done}: merged в fact_clicks_daily")
             progress.progress(min(0.99, chunks_done / 20))
 
     progress.progress(1.0)
