@@ -18,10 +18,30 @@ def read_csv_ru(f):
 
 # ---------- LOADERS ----------
 
+def pick_col(df, candidates):
+    cols = {c.strip(): c for c in df.columns}  # map stripped->original
+    for cand in candidates:
+        if cand in cols:
+            return cols[cand]
+    # fallback: try case-insensitive contains
+    lowered = {c.lower().strip(): c for c in df.columns}
+    for cand in candidates:
+        key = cand.lower().strip()
+        if key in lowered:
+            return lowered[key]
+    raise KeyError(f"Не найдена ни одна из колонок: {candidates}. Фактические колонки: {list(df.columns)}")
+
 def load_clicks(file):
     df = read_csv_ru(file)
-    df["day"] = pd.to_datetime(df["Время клика"], errors="coerce").dt.date
-    df["subid"] = df["Subid"]
+
+    # авто-выбор колонки времени клика
+    time_col = pick_col(df, ["Время клика", "Дата и время", "Click time", "Click Time", "Datetime", "DateTime"])
+
+    # авто-выбор Subid
+    subid_col = pick_col(df, ["Subid", "SubId", "subid", "SUBID"])
+
+    df["day"] = pd.to_datetime(df[time_col], errors="coerce").dt.date
+    df["subid"] = df[subid_col].astype(str)
 
     agg = (
         df.dropna(subset=["day", "subid"])
