@@ -63,6 +63,22 @@ def copy_df_to_table(conn, df: pd.DataFrame, table: str):
     cur.copy_expert(sql, buf)
     cur.close()
 
+def fmt_pct_cell(val):
+    # текст в ячейке
+    if val is None or pd.isna(val):
+        return "—"
+    sign = "+" if val > 0 else ""
+    return f"{sign}{val:.2f}%"
+
+def style_pct_color(val):
+    # цвет текста
+    if val is None or pd.isna(val):
+        return ""
+    if val > 0:
+        return "color: #22c55e; font-weight: 700;"
+    if val < 0:
+        return "color: #ef4444; font-weight: 700;"
+    return "color: #a3a3a3;"
 
 def pct_change(curr: float, prev: float):
     if prev is None or prev == 0:
@@ -501,7 +517,19 @@ for sub2, s_y in top_sub2_y.items():
             "Δ% vs prev": None if ch is None else round(ch, 2),
         }
     )
-st.dataframe(pd.DataFrame(rows), use_container_width=True)
+df_tbl = pd.DataFrame(rows)
+
+# форматируем отображение процента
+df_tbl["Δ% vs prev"] = df_tbl["Δ% vs prev"].apply(lambda x: None if x is None else float(x))
+
+sty = (
+    df_tbl.style
+    .format({"Δ% vs prev": fmt_pct_cell})
+    .applymap(style_pct_color, subset=["Δ% vs prev"])
+)
+
+st.dataframe(sty, use_container_width=True)
+
 
 # --- Top 5 Campaign by Sales (campaign_short) ---
 st.subheader("🏆 Топ 5 Кампания по продажам (вчера)")
@@ -520,7 +548,17 @@ for camp, s_y in top_c_y.items():
             "Δ% vs prev": None if ch is None else round(ch, 2),
         }
     )
-st.dataframe(pd.DataFrame(rows), use_container_width=True)
+df_tbl = pd.DataFrame(rows)
+df_tbl["Δ% vs prev"] = df_tbl["Δ% vs prev"].apply(lambda x: None if x is None else float(x))
+
+sty = (
+    df_tbl.style
+    .format({"Δ% vs prev": fmt_pct_cell})
+    .applymap(style_pct_color, subset=["Δ% vs prev"])
+)
+
+st.dataframe(sty, use_container_width=True)
+
 
 # --- Gain helpers ---
 def gain_table(group_col: str, metric_col: str, title: str, top_n: int = 10, exclude_organic: bool = False):
