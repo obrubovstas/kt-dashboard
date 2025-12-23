@@ -197,16 +197,36 @@ def load_conversions(file):
         )
         st.write("🧪 after COPY conv to staging")
 
-        st.write("🧪 before MERGE conv to fact")
+        # 🔍 ЛОГ №1 — перед UPDATE
+        st.write("🧪 before UPDATE fact")
+        
+        # 1) UPDATE существующих строк
+        conn.execute(text("""
+            update fact_conversions_daily f
+            set
+              leads = s.leads,
+              sales = s.sales
+            from staging_conversions_daily s
+            where f.day = s.day and f.subid = s.subid;
+        """))
+        
+        # 🔍 ЛОГ №2 — после UPDATE, перед INSERT
+        st.write("🧪 after UPDATE fact, before INSERT new")
+        
+        # 2) INSERT только новых строк
         conn.execute(text("""
             insert into fact_conversions_daily(day, subid, leads, sales)
-            select day, subid, leads, sales
-            from staging_conversions_daily
-            on conflict (day, subid)
-            do update set
-              leads = excluded.leads,
-              sales = excluded.sales;
+            select s.day, s.subid, s.leads, s.sales
+            from staging_conversions_daily s
+            left join fact_conversions_daily f
+              on f.day = s.day and f.subid = s.subid
+            where f.subid is null;
         """))
+        
+        # 🔍 ЛОГ №3 — после INSERT
+        st.write("🧪 after INSERT new")
+
+
         st.write("🧪 after MERGE conv to fact")
 
     st.write("🎉 conversions загружены")
