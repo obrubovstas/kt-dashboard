@@ -655,17 +655,15 @@ def new_table(group_col: str, metric_col: str, title: str, top_n: int = 10, excl
 
 # Traffic gainers (clicks)
 gain_table_pct("sub2_norm", "clicks", "📈 Top 10 Sub ID 2 Traffic Gainers (клики, %)", exclude_organic=True)
-new_table("sub2_norm", "clicks", "🆕 New Sub ID 2 Traffic (prev=0)", exclude_organic=True)
-
-gain_table_pct("campaign_short", "clicks", "📈 Top 10 Кампания Traffic Gainers (клики, %)")
-new_table("campaign_short", "clicks", "🆕 New Кампания Traffic (prev=0)")
-
-# Sales gainers
 gain_table_pct("sub2_norm", "sales", "💰 Top 10 Sub ID 2 Sales Gainers (продажи, %)", exclude_organic=True)
+new_table("sub2_norm", "clicks", "🆕 New Sub ID 2 Traffic (prev=0)", exclude_organic=True)
 new_table("sub2_norm", "sales", "🆕 New Sub ID 2 Sales (prev=0)", exclude_organic=True)
 
+gain_table_pct("campaign_short", "clicks", "📈 Top 10 Кампания Traffic Gainers (клики, %)")
 gain_table_pct("campaign_short", "sales", "💰 Top 10 Кампания Sales Gainers (продажи, %)")
+new_table("campaign_short", "clicks", "🆕 New Кампания Traffic (prev=0)")
 new_table("campaign_short", "sales", "🆕 New Кампания Sales (prev=0)")
 
+# Sales gainers
 gain_table_pct("offer", "sales", "💰 Top 10 Оффер Sales Gainers (продажи, %)")
 new_table("offer", "sales", "🆕 New Оффер Sales (prev=0)")
