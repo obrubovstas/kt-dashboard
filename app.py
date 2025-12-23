@@ -39,25 +39,13 @@ def load_clicks(file):
         sep=";",
         encoding="utf-8-sig",
         engine="python",
-        chunksize=150_000  # чуть меньше, чтобы стабильнее
+        chunksize=200_000
     )
     st.write("🧩 csv iterator created")
 
-    total_rows = 0
     chunks_done = 0
+    total_rows = 0
     progress = st.progress(0)
-
-    def batched(records, batch_size=2000):
-        for i in range(0, len(records), batch_size):
-            yield records[i:i+batch_size]
-
-    # ВАЖНО: выполняем много маленьких execute вместо одного огромного
-    upsert_sql = text("""
-        insert into fact_clicks_daily(day, subid, clicks)
-        values (:day, :subid, :clicks)
-        on conflict (day, subid)
-        do update set clicks = fact_clicks_daily.clicks + excluded.clicks
-    """)
 
     with engine.begin() as conn:
         for chunk in df_iter:
@@ -77,24 +65,28 @@ def load_clicks(file):
             )
 
             total_rows += len(chunk)
-
-            # ✅ прогресс показываем ДО вставки
-            st.write(f"⬆️ chunk #{chunks_done}: прочитал {total_rows:,} строк, готовлю {len(agg):,} upsert-строк…")
+            st.write(f"⬆️ chunk #{chunks_done}: прочитал {total_rows:,} строк, аггрегировал {len(agg):,}…")
 
             if agg.empty:
                 continue
 
-            records = agg.to_dict("records")
+            # 1) чистим staging под этот chunk (быстро)
+            conn.execute(text("truncate staging_clicks_daily;"))
 
-            # ✅ пишем порциями
-            batches = 0
-            for b in batched(records, batch_size=2000):
-                conn.execute(upsert_sql, b)
-                batches += 1
+            # 2) грузим agg в staging самым быстрым способом для SQLAlchemy — to_sql multi rows
+            #    (для Neon это обычно быстрее чем тысячи upsert’ов)
+            agg.to_sql("staging_clicks_daily", con=conn, if_exists="append", index=False, method="multi", chunksize=5000)
 
-            st.write(f"✅ chunk #{chunks_done}: записано {len(records):,} строк в {batches} батчах")
+            # 3) одним запросом мержим staging -> факт (и суммируем clicks)
+            conn.execute(text("""
+                insert into fact_clicks_daily(day, subid, clicks)
+                select day, subid, clicks
+                from staging_clicks_daily
+                on conflict (day, subid)
+                do update set clicks = fact_clicks_daily.clicks + excluded.clicks;
+            """))
 
-            # прогресс-бар “по ощущениям” (поскольку точного total строк мы не знаем заранее)
+            st.write(f"✅ chunk #{chunks_done}: merged в fact_clicks_daily")
             progress.progress(min(0.99, chunks_done / 20))
 
     progress.progress(1.0)
