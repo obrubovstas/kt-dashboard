@@ -32,19 +32,26 @@ def pick_col(df, candidates):
     raise KeyError(f"Не найдена ни одна из колонок: {candidates}. Фактические колонки: {list(df.columns)}")
 
 def load_clicks(file):
+    st.write("🧩 start load_clicks")  # маркер, должен появиться мгновенно
+
     df_iter = pd.read_csv(
         file,
         sep=";",
         encoding="utf-8-sig",
         engine="python",
-        chunksize=200_000  # ← ключевой момент
+        chunksize=200_000
     )
 
+    st.write("🧩 csv iterator created")  # тоже должен появиться быстро
+
     total_rows = 0
+    chunks_done = 0
 
     for chunk in df_iter:
+        chunks_done += 1
+
         time_col = pick_col(chunk, ["Время клика", "Дата и время"])
-        subid_col = pick_col(chunk, ["Subid", "SubId", "subid"])
+        subid_col = pick_col(chunk, ["Subid", "SubId", "subid", "SUBID"])
 
         chunk["day"] = pd.to_datetime(chunk[time_col], errors="coerce").dt.date
         chunk["subid"] = chunk[subid_col].astype(str)
@@ -56,22 +63,20 @@ def load_clicks(file):
                  .reset_index(name="clicks")
         )
 
-        if agg.empty:
-            continue
-
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                insert into fact_clicks_daily(day, subid, clicks)
-                values (:day, :subid, :clicks)
-                on conflict (day, subid)
-                do update set clicks = fact_clicks_daily.clicks + excluded.clicks
-                """),
-                agg.to_dict("records")
-            )
+        if not agg.empty:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("""
+                    insert into fact_clicks_daily(day, subid, clicks)
+                    values (:day, :subid, :clicks)
+                    on conflict (day, subid)
+                    do update set clicks = fact_clicks_daily.clicks + excluded.clicks
+                    """),
+                    agg.to_dict("records")
+                )
 
         total_rows += len(chunk)
-        st.write(f"⬆️ обработано строк кликов: {total_rows:,}")
+        st.write(f"⬆️ chunk #{chunks_done}: обработано строк кликов: {total_rows:,}")
 
     st.write(f"✅ clicks загружены, всего строк: {total_rows:,}")
 
