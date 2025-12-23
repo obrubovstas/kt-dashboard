@@ -1,49 +1,56 @@
 import io
-import csv
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
 
 st.set_page_config(page_title="KT dashboard", layout="wide")
 
+# ---------------- DB ----------------
 @st.cache_resource
 def get_engine():
     return create_engine(
         st.secrets["DATABASE_URL"],
-        pool_pre_ping=True
+        pool_pre_ping=True,
+        future=True
     )
 
 engine = get_engine()
 
+# ---------------- Helpers ----------------
 def read_csv_ru(f):
+    # utf-8-sig лечит BOM в заголовках
     return pd.read_csv(f, sep=";", encoding="utf-8-sig", engine="python")
 
-# ---------- LOADERS ----------
-
-def pick_col(df, candidates):
-    cols = {c.strip(): c for c in df.columns}  # map stripped->original
+def pick_col(df: pd.DataFrame, candidates: list[str]) -> str:
+    # 1) точное совпадение после strip
+    stripped_map = {c.strip(): c for c in df.columns}
     for cand in candidates:
-        if cand in cols:
-            return cols[cand]
-    # fallback: try case-insensitive contains
+        if cand in stripped_map:
+            return stripped_map[cand]
+
+    # 2) case-insensitive совпадение
     lowered = {c.lower().strip(): c for c in df.columns}
     for cand in candidates:
         key = cand.lower().strip()
         if key in lowered:
             return lowered[key]
-    raise KeyError(f"Не найдена ни одна из колонок: {candidates}. Фактические колонки: {list(df.columns)}")
+
+    raise KeyError(
+        f"Не найдена колонка из списка {candidates}. "
+        f"Фактические колонки: {list(df.columns)}"
+    )
 
 def copy_df_to_table(conn, df: pd.DataFrame, table: str):
     """
     COPY df -> table (Postgres) через psycopg2 copy_expert.
-    conn здесь SQLAlchemy connection (внутри engine.begin()).
+    conn: SQLAlchemy Connection (внутри engine.begin()).
     """
-    # SQLAlchemy connection -> raw psycopg2 connection
-    raw = conn.connection
+    raw = conn.connection  # psycopg2 connection
     cur = raw.cursor()
 
     buf = io.StringIO()
-    df.to_csv(buf, index=False, header=False)  # без заголовка
+    # Без header, иначе COPY будет пытаться вставить заголовок как данные
+    df.to_csv(buf, index=False, header=False)
     buf.seek(0)
 
     cols = ",".join(df.columns)
@@ -52,9 +59,11 @@ def copy_df_to_table(conn, df: pd.DataFrame, table: str):
     cur.copy_expert(sql, buf)
     cur.close()
 
+# ---------------- Loaders ----------------
 def load_clicks(file):
-    st.write("🧩 start load_clicks")
+    st.write("🧩 start_load_clicks")
 
+    # Читаем кусками — чтобы не убивать память на Streamlit Cloud
     df_iter = pd.read_csv(
         file,
         sep=";",
@@ -72,7 +81,8 @@ def load_clicks(file):
         for chunk in df_iter:
             chunks_done += 1
 
-            time_col = pick_col(chunk, ["Время клика", "Дата и время"])
+            # выбираем колонки
+            time_col = pick_col(chunk, ["Время клика", "Дата и время", "Click time", "Click Time"])
             subid_col = pick_col(chunk, ["Subid", "SubId", "subid", "SUBID"])
 
             chunk["day"] = pd.to_datetime(chunk[time_col], errors="coerce").dt.date
@@ -91,16 +101,16 @@ def load_clicks(file):
             if agg.empty:
                 continue
 
-            # 1) очистка staging
+            # ---- DB pipeline: TRUNCATE staging -> COPY -> MERGE ----
+            st.write("🧪 before TRUNCATE staging")
             conn.execute(text("truncate staging_clicks_daily;"))
-            st.write("🧪 staging truncated")
+            st.write("🧪 after TRUNCATE staging")
 
-            # 2) COPY в staging (самый быстрый путь)
-            # важно: колонки должны совпасть с таблицей
+            st.write("🧪 before COPY to staging")
             copy_df_to_table(conn, agg[["day", "subid", "clicks"]], "staging_clicks_daily")
-            st.write("🧪 copied to staging")
+            st.write("🧪 after COPY to staging")
 
-            # 3) merge в факт
+            st.write("🧪 before MERGE to fact")
             conn.execute(text("""
                 insert into fact_clicks_daily(day, subid, clicks)
                 select day, subid, clicks
@@ -108,7 +118,7 @@ def load_clicks(file):
                 on conflict (day, subid)
                 do update set clicks = fact_clicks_daily.clicks + excluded.clicks;
             """))
-            st.write(f"✅ chunk #{chunks_done}: merged в fact")
+            st.write("🧪 after MERGE to fact")
 
             progress.progress(min(0.99, chunks_done / 20))
 
@@ -116,19 +126,39 @@ def load_clicks(file):
     st.write(f"🎉 clicks загружены, всего исходных строк: {total_rows:,}")
 
 def load_conversions(file):
+    st.write("🧩 start_load_conversions")
+
     df = read_csv_ru(file)
-    df["subid"] = df["Subid"]
 
-    df["day_lead"] = pd.to_datetime(df["Время конверсии"], errors="coerce").dt.date
+    subid_col = pick_col(df, ["Subid", "SubId", "subid", "SUBID"])
+    status_col = pick_col(df, ["Ориг. статус", "Orig. status", "Orig status", "Status"])
+    conv_time_col = pick_col(df, ["Время конверсии", "Conversion time", "Time conversion"])
+    sale_time_col = None
+    # "Время продажи" иногда отсутствует — нормально
+    for cand in ["Время продажи", "Sale time", "Time sale"]:
+        try:
+            sale_time_col = pick_col(df, [cand])
+            break
+        except Exception:
+            pass
 
-    sale_time = df["Время продажи"].where(
-        df["Время продажи"].notna() & (df["Время продажи"] != ""),
-        df["Время конверсии"]
-    )
+    df["subid"] = df[subid_col].astype(str)
+    df["_status"] = df[status_col].astype(str).str.lower()
+
+    df["day_lead"] = pd.to_datetime(df[conv_time_col], errors="coerce").dt.date
+
+    if sale_time_col:
+        sale_time = df[sale_time_col].where(
+            df[sale_time_col].notna() & (df[sale_time_col].astype(str) != ""),
+            df[conv_time_col]
+        )
+    else:
+        sale_time = df[conv_time_col]
+
     df["day_sale"] = pd.to_datetime(sale_time, errors="coerce").dt.date
 
     leads = (
-        df[df["Ориг. статус"].str.lower() == "lead"]
+        df[df["_status"] == "lead"]
         .dropna(subset=["day_lead", "subid"])
         .groupby(["day_lead", "subid"])
         .size()
@@ -137,7 +167,7 @@ def load_conversions(file):
     )
 
     sales = (
-        df[df["Ориг. статус"].str.lower() == "sale"]
+        df[df["_status"] == "sale"]
         .dropna(subset=["day_sale", "subid"])
         .groupby(["day_sale", "subid"])
         .size()
@@ -150,6 +180,8 @@ def load_conversions(file):
           .fillna(0)
           .astype({"leads": int, "sales": int})
     )
+
+    st.write(f"🧪 conversions aggregated rows: {len(merged):,}")
 
     with engine.begin() as conn:
         conn.execute(
@@ -164,8 +196,9 @@ def load_conversions(file):
             merged.to_dict("records")
         )
 
-# ---------- UI ----------
+    st.write("🎉 conversions загружены")
 
+# ---------------- UI ----------------
 st.title("📊 KT dashboard")
 st.caption("build: 2025-12-23 v3 copy")
 
@@ -174,22 +207,21 @@ with st.sidebar:
     clicks = st.file_uploader("click.csv", type="csv")
     conv = st.file_uploader("conv.csv", type="csv")
 
-if st.button("Загрузить в БД", type="primary"):
-    with st.spinner("Загружаю данные в базу..."):
-        if clicks:
-            st.write("📥 Загружаю clicks...")
-            load_clicks(clicks)
-            st.write("✅ clicks загружены")
+    if st.button("Загрузить в БД", type="primary"):
+        with st.spinner("Загружаю данные в базу..."):
+            if clicks:
+                st.write("📥 Загружаю clicks...")
+                load_clicks(clicks)
+                st.write("✅ clicks загружены")
 
-        if conv:
-            st.write("📥 Загружаю conversions...")
-            load_conversions(conv)
-            st.write("✅ conversions загружены")
+            if conv:
+                st.write("📥 Загружаю conversions...")
+                load_conversions(conv)
+                st.write("✅ conversions загружены")
 
-    st.success("🎉 Данные успешно загружены в БД")
+        st.success("🎉 Данные успешно загружены в БД")
 
-# ---------- DASHBOARD ----------
-
+# ---------------- DASHBOARD ----------------
 df = pd.read_sql("""
 select
   c.day,
@@ -204,7 +236,7 @@ order by c.day;
 """, engine)
 
 if df.empty:
-    st.info("Загрузи CSV файлы")
+    st.info("Загрузи CSV файлы — появится дашборд.")
     st.stop()
 
 last_day = df["day"].max()
@@ -232,11 +264,5 @@ if prev_day:
     )
 
     st.dataframe(growth, use_container_width=True)
-
-st.write("🧪 before TRUNCATE")
-conn.execute(text("truncate staging_clicks_daily;"))
-st.write("🧪 after TRUNCATE, before to_sql")
-agg.to_sql(... )
-st.write("🧪 after to_sql, before merge")
-conn.execute(text("""insert into fact..."""))
-st.write("🧪 after merge")
+else:
+    st.warning("Пока только один день в базе — для сравнения нужен минимум 2 дня.")
