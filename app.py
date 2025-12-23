@@ -255,19 +255,23 @@ with st.sidebar:
         st.success("🎉 Данные успешно загружены в БД")
 
 # ---------------- DASHBOARD ----------------
-df = pd.read_sql("""
+with keys as (
+  select day, subid from fact_clicks_daily
+  union
+  select day, subid from fact_conversions_daily
+)
 select
-  c.day,
-  c.subid,
-  c.clicks,
-  coalesce(v.leads,0) as leads,
-  coalesce(v.sales,0) as sales
-from fact_clicks_daily c
+  k.day,
+  k.subid,
+  coalesce(c.clicks, 0) as clicks,
+  coalesce(v.leads, 0) as leads,
+  coalesce(v.sales, 0) as sales
+from keys k
+left join fact_clicks_daily c
+  on c.day = k.day and c.subid = k.subid
 left join fact_conversions_daily v
-  on v.day = c.day and v.subid = c.subid
-order by c.day;
-""", engine)
-
+  on v.day = k.day and v.subid = k.subid
+order by k.day;
 if df.empty:
     st.info("Загрузи CSV файлы — появится дашборд.")
     st.stop()
