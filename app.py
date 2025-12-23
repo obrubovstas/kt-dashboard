@@ -32,34 +32,48 @@ def pick_col(df, candidates):
     raise KeyError(f"Не найдена ни одна из колонок: {candidates}. Фактические колонки: {list(df.columns)}")
 
 def load_clicks(file):
-    df = read_csv_ru(file)
-
-    # авто-выбор колонки времени клика
-    time_col = pick_col(df, ["Время клика", "Дата и время", "Click time", "Click Time", "Datetime", "DateTime"])
-
-    # авто-выбор Subid
-    subid_col = pick_col(df, ["Subid", "SubId", "subid", "SUBID"])
-
-    df["day"] = pd.to_datetime(df[time_col], errors="coerce").dt.date
-    df["subid"] = df[subid_col].astype(str)
-
-    agg = (
-        df.dropna(subset=["day", "subid"])
-          .groupby(["day", "subid"])
-          .size()
-          .reset_index(name="clicks")
+    df_iter = pd.read_csv(
+        file,
+        sep=";",
+        encoding="utf-8-sig",
+        engine="python",
+        chunksize=200_000  # ← ключевой момент
     )
 
-    with engine.begin() as conn:
-        conn.execute(
-            text("""
-            insert into fact_clicks_daily(day, subid, clicks)
-            values (:day, :subid, :clicks)
-            on conflict (day, subid)
-            do update set clicks = excluded.clicks
-            """),
-            agg.to_dict("records")
+    total_rows = 0
+
+    for chunk in df_iter:
+        time_col = pick_col(chunk, ["Время клика", "Дата и время"])
+        subid_col = pick_col(chunk, ["Subid", "SubId", "subid"])
+
+        chunk["day"] = pd.to_datetime(chunk[time_col], errors="coerce").dt.date
+        chunk["subid"] = chunk[subid_col].astype(str)
+
+        agg = (
+            chunk.dropna(subset=["day", "subid"])
+                 .groupby(["day", "subid"])
+                 .size()
+                 .reset_index(name="clicks")
         )
+
+        if agg.empty:
+            continue
+
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                insert into fact_clicks_daily(day, subid, clicks)
+                values (:day, :subid, :clicks)
+                on conflict (day, subid)
+                do update set clicks = fact_clicks_daily.clicks + excluded.clicks
+                """),
+                agg.to_dict("records")
+            )
+
+        total_rows += len(chunk)
+        st.write(f"⬆️ обработано строк кликов: {total_rows:,}")
+
+    st.write(f"✅ clicks загружены, всего строк: {total_rows:,}")
 
 def load_conversions(file):
     df = read_csv_ru(file)
