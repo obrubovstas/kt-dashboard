@@ -185,9 +185,9 @@ def load_conversions(file):
 
     # 🔽 ВАЖНО: этот with НА ТОМ ЖЕ УРОВНЕ, что и merged
     with engine.begin() as conn:
-        st.write("🧪 before TRUNCATE conv staging")
-        conn.execute(text("truncate staging_conversions_daily;"))
-        st.write("🧪 after TRUNCATE conv staging")
+        st.write("🧪 before DELETE conv staging")
+        conn.execute(text("delete from staging_conversions_daily;"))
+        st.write("🧪 after DELETE conv staging")
 
         st.write("🧪 before COPY conv to staging")
         copy_df_to_table(
