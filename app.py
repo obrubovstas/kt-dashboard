@@ -127,6 +127,7 @@ def load_conversions(file):
 # ---------- UI ----------
 
 st.title("📊 KT dashboard")
+st.caption("build: 2025-12-23 v2 chunks")
 
 with st.sidebar:
     st.header("Загрузка CSV")
