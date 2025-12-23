@@ -119,12 +119,19 @@ with st.sidebar:
     clicks = st.file_uploader("click.csv", type="csv")
     conv = st.file_uploader("conv.csv", type="csv")
 
-    if st.button("Загрузить в БД", type="primary"):
+if st.button("Загрузить в БД", type="primary"):
+    with st.spinner("Загружаю данные в базу..."):
         if clicks:
+            st.write("📥 Загружаю clicks...")
             load_clicks(clicks)
+            st.write("✅ clicks загружены")
+
         if conv:
+            st.write("📥 Загружаю conversions...")
             load_conversions(conv)
-        st.success("Данные загружены")
+            st.write("✅ conversions загружены")
+
+    st.success("🎉 Данные успешно загружены в БД")
 
 # ---------- DASHBOARD ----------
 
