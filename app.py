@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, text
 st.set_page_config(page_title="KT dashboard", layout="wide")
 
 
-# ---------------- DB ----------------
+# ===================== DB =====================
 @st.cache_resource
 def get_engine():
     return create_engine(
@@ -21,18 +21,15 @@ def get_engine():
 engine = get_engine()
 
 
-# ---------------- Helpers ----------------
-def read_csv_ru(f):
-    # utf-8-sig лечит BOM в заголовках
-    return pd.read_csv(f, sep=";", encoding="utf-8-sig", engine="python")
-
-
+# ===================== Helpers =====================
 def pick_col(df: pd.DataFrame, candidates: list[str]) -> str:
+    # 1) exact (strip)
     stripped_map = {c.strip(): c for c in df.columns}
     for cand in candidates:
         if cand in stripped_map:
             return stripped_map[cand]
 
+    # 2) case-insensitive
     lowered = {c.lower().strip(): c for c in df.columns}
     for cand in candidates:
         key = cand.lower().strip()
@@ -43,6 +40,10 @@ def pick_col(df: pd.DataFrame, candidates: list[str]) -> str:
         f"Не найдена колонка из списка {candidates}. "
         f"Фактические колонки: {list(df.columns)}"
     )
+
+
+def read_csv_ru(f):
+    return pd.read_csv(f, sep=";", encoding="utf-8-sig", engine="python")
 
 
 def copy_df_to_table(conn, df: pd.DataFrame, table: str):
@@ -63,22 +64,6 @@ def copy_df_to_table(conn, df: pd.DataFrame, table: str):
     cur.copy_expert(sql, buf)
     cur.close()
 
-def fmt_pct_cell(val):
-    # текст в ячейке
-    if val is None or pd.isna(val):
-        return "—"
-    sign = "+" if val > 0 else ""
-    return f"{sign}{val:.2f}%"
-
-def style_pct_color(val):
-    # цвет текста
-    if val is None or pd.isna(val):
-        return ""
-    if val > 0:
-        return "color: #22c55e; font-weight: 700;"
-    if val < 0:
-        return "color: #ef4444; font-weight: 700;"
-    return "color: #a3a3a3;"
 
 def pct_change(curr: float, prev: float):
     if prev is None or prev == 0:
@@ -94,9 +79,25 @@ def metric_with_pct(label: str, curr: int, prev: int):
         st.metric(label, curr, delta=float(round(d, 2)), delta_color="normal")
 
 
-# ---------------- Schema bootstrap (safe) ----------------
+def fmt_pct_cell(val):
+    if val is None or pd.isna(val):
+        return "—"
+    sign = "+" if val > 0 else ""
+    return f"{sign}{val:.2f}%"
+
+
+def style_pct_color(val):
+    if val is None or pd.isna(val):
+        return ""
+    if val > 0:
+        return "color: #22c55e; font-weight: 700;"
+    if val < 0:
+        return "color: #ef4444; font-weight: 700;"
+    return "color: #a3a3a3;"
+
+
+# ===================== Schema bootstrap =====================
 def ensure_schema():
-    # Таблицы фактов у тебя уже есть, но на всякий случай.
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -158,8 +159,13 @@ def ensure_schema():
 ensure_schema()
 
 
-# ---------------- Loaders ----------------
-def load_clicks(file):
+# ===================== Loaders =====================
+def load_clicks(file, mode: str = "replace_day"):
+    """
+    mode:
+      - replace_day: безопасно (idempotent) — перед загрузкой дня очищаем clicks за этот day
+      - append: добавляет к существующим (если грузишь кусками/несколько файлов на один день)
+    """
     st.write("🧩 start_load_clicks")
 
     df_iter = pd.read_csv(
@@ -174,6 +180,8 @@ def load_clicks(file):
     chunks_done = 0
     total_rows = 0
     progress = st.progress(0)
+
+    detected_day = None
 
     with engine.begin() as conn:
         for chunk in df_iter:
@@ -193,17 +201,21 @@ def load_clicks(file):
             chunk["day"] = pd.to_datetime(chunk[time_col], errors="coerce").dt.date
             chunk["subid"] = chunk[subid_col].astype(str)
 
-            # -------- DIM загрузка (по subid) через TEMP staging --------
+            # Определяем день файла на первом чанке
+            if detected_day is None:
+                detected_day = chunk["day"].dropna().min()
+                if detected_day is not None and mode == "replace_day":
+                    st.write(f"🧹 replace_day: очищаю clicks за {detected_day}")
+                    conn.execute(text("delete from fact_clicks_daily where day = :d"), {"d": detected_day})
+
+            # -------- DIM (subid -> attrs) через TEMP staging --------
             dim = chunk[[subid_col, offer_col, flag_col, os_col, sub2_col, camp_col, sub1_col]].copy()
             dim.columns = ["subid", "offer", "country_flag", "os", "sub_id_2", "campaign", "sub_id_1"]
             dim["subid"] = dim["subid"].astype(str)
 
-            # выкидываем пустые subid
             dim = dim[dim["subid"].notna() & (dim["subid"].astype(str).str.len() > 0)]
-            # одна строка на subid в рамках чанка (последняя)
             dim = dim.drop_duplicates(subset=["subid"], keep="last")
 
-            # TEMP table, без TRUNCATE/DELETE постоянных таблиц
             conn.execute(text("drop table if exists staging_dim_subid_tmp;"))
             conn.execute(
                 text(
@@ -220,42 +232,45 @@ def load_clicks(file):
                     """
                 )
             )
-            copy_df_to_table(conn, dim[["subid", "offer", "country_flag", "os", "sub_id_2", "campaign", "sub_id_1"]],
-                             "staging_dim_subid_tmp")
-
-            # UPDATE существующих (берём только непустые значения из staging)
-            conn.execute(
-                text(
-                    """
-                    update dim_subid d
-                    set
-                      offer = coalesce(nullif(s.offer,''), d.offer),
-                      country_flag = coalesce(nullif(s.country_flag,''), d.country_flag),
-                      os = coalesce(nullif(s.os,''), d.os),
-                      sub_id_2 = coalesce(nullif(s.sub_id_2,''), d.sub_id_2),
-                      campaign = coalesce(nullif(s.campaign,''), d.campaign),
-                      sub_id_1 = coalesce(nullif(s.sub_id_1,''), d.sub_id_1),
-                      updated_at = now()
-                    from staging_dim_subid_tmp s
-                    where d.subid = s.subid;
-                    """
+            if not dim.empty:
+                copy_df_to_table(
+                    conn,
+                    dim[["subid", "offer", "country_flag", "os", "sub_id_2", "campaign", "sub_id_1"]],
+                    "staging_dim_subid_tmp",
                 )
-            )
 
-            # INSERT новых
-            conn.execute(
-                text(
-                    """
-                    insert into dim_subid(subid, offer, country_flag, os, sub_id_2, campaign, sub_id_1)
-                    select s.subid, s.offer, s.country_flag, s.os, s.sub_id_2, s.campaign, s.sub_id_1
-                    from staging_dim_subid_tmp s
-                    left join dim_subid d on d.subid = s.subid
-                    where d.subid is null;
-                    """
+                conn.execute(
+                    text(
+                        """
+                        update dim_subid d
+                        set
+                          offer = coalesce(nullif(s.offer,''), d.offer),
+                          country_flag = coalesce(nullif(s.country_flag,''), d.country_flag),
+                          os = coalesce(nullif(s.os,''), d.os),
+                          sub_id_2 = coalesce(nullif(s.sub_id_2,''), d.sub_id_2),
+                          campaign = coalesce(nullif(s.campaign,''), d.campaign),
+                          sub_id_1 = coalesce(nullif(s.sub_id_1,''), d.sub_id_1),
+                          updated_at = now()
+                        from staging_dim_subid_tmp s
+                        where d.subid = s.subid;
+                        """
+                    )
                 )
-            )
+
+                conn.execute(
+                    text(
+                        """
+                        insert into dim_subid(subid, offer, country_flag, os, sub_id_2, campaign, sub_id_1)
+                        select s.subid, s.offer, s.country_flag, s.os, s.sub_id_2, s.campaign, s.sub_id_1
+                        from staging_dim_subid_tmp s
+                        left join dim_subid d on d.subid = s.subid
+                        where d.subid is null;
+                        """
+                    )
+                )
 
             # -------- FACT clicks --------
+            # если mode=replace_day, всё равно безопасно: мы уже удалили day и заново заливаем
             agg = (
                 chunk.dropna(subset=["day", "subid"])
                 .groupby(["day", "subid"])
@@ -269,21 +284,35 @@ def load_clicks(file):
             if agg.empty:
                 continue
 
-            # staging_clicks_daily (перманентная) — можно TRUNCATE (у тебя direct connection)
             conn.execute(text("truncate staging_clicks_daily;"))
             copy_df_to_table(conn, agg[["day", "subid", "clicks"]], "staging_clicks_daily")
 
-            conn.execute(
-                text(
-                    """
-                    insert into fact_clicks_daily(day, subid, clicks)
-                    select day, subid, clicks
-                    from staging_clicks_daily
-                    on conflict (day, subid)
-                    do update set clicks = fact_clicks_daily.clicks + excluded.clicks;
-                    """
+            if mode == "append":
+                # additive
+                conn.execute(
+                    text(
+                        """
+                        insert into fact_clicks_daily(day, subid, clicks)
+                        select day, subid, clicks
+                        from staging_clicks_daily
+                        on conflict (day, subid)
+                        do update set clicks = fact_clicks_daily.clicks + excluded.clicks;
+                        """
+                    )
                 )
-            )
+            else:
+                # replace (idempotent) — просто перезаписываем значения
+                conn.execute(
+                    text(
+                        """
+                        insert into fact_clicks_daily(day, subid, clicks)
+                        select day, subid, clicks
+                        from staging_clicks_daily
+                        on conflict (day, subid)
+                        do update set clicks = excluded.clicks;
+                        """
+                    )
+                )
 
             progress.progress(min(0.99, chunks_done / 20))
 
@@ -350,7 +379,6 @@ def load_conversions(file):
     st.write(f"🧪 conversions aggregated rows: {len(merged):,}")
 
     with engine.begin() as conn:
-        # TEMP staging (не трогаем постоянные таблицы truncate/delete)
         conn.execute(text("drop table if exists staging_conversions_tmp;"))
         conn.execute(
             text(
@@ -365,7 +393,8 @@ def load_conversions(file):
             )
         )
 
-        copy_df_to_table(conn, merged[["day", "subid", "leads", "sales"]], "staging_conversions_tmp")
+        if not merged.empty:
+            copy_df_to_table(conn, merged[["day", "subid", "leads", "sales"]], "staging_conversions_tmp")
 
         # UPDATE существующих
         conn.execute(
@@ -398,20 +427,27 @@ def load_conversions(file):
     st.write("🎉 conversions загружены")
 
 
-# ---------------- UI ----------------
+# ===================== UI =====================
 st.title("📊 KT dashboard")
-st.caption("build: 2025-12-23 v4 dims + gainers")
+st.caption("build: 2025-12-23 v4.1 (% gainers + NEW + dim_subid)")
 
 with st.sidebar:
     st.header("Загрузка CSV")
     clicks_file = st.file_uploader("click.csv", type="csv")
     conv_file = st.file_uploader("conv.csv", type="csv")
 
+    load_mode = st.radio(
+        "Режим загрузки clicks",
+        options=["replace_day", "append"],
+        index=0,
+        help="replace_day — безопасно (можно загружать один и тот же файл повторно). append — складывает клики (только если точно нужно).",
+    )
+
     if st.button("Загрузить в БД", type="primary"):
         with st.spinner("Загружаю данные в базу..."):
             if clicks_file:
                 st.write("📥 Загружаю clicks...")
-                load_clicks(clicks_file)
+                load_clicks(clicks_file, mode=load_mode)
                 st.write("✅ clicks загружены")
 
             if conv_file:
@@ -422,7 +458,7 @@ with st.sidebar:
         st.success("🎉 Данные успешно загружены в БД")
 
 
-# ---------------- Data for dashboard ----------------
+# ===================== Data for dashboard =====================
 df = pd.read_sql(
     """
     with keys as (
@@ -487,7 +523,7 @@ p_sales = int(df_p["sales"].sum())
 # KPI
 k1, k2, k3 = st.columns(3)
 with k1:
-    metric_with_pct("Инсталлы", y_clicks, p_clicks)  # как ты просил: клики = инсталлы
+    metric_with_pct("Инсталлы", y_clicks, p_clicks)  # клики = инсталлы (как ты хотел)
 with k2:
     metric_with_pct("Регистрации", y_leads, p_leads)
 with k3:
@@ -497,7 +533,8 @@ with k3:
 st.subheader("📈 Продажи по дням")
 st.line_chart(df.groupby("day")["sales"].sum())
 
-# --- Top 5 Sub ID 2 by Sales (exclude Organic) ---
+# ===================== Top tables =====================
+# Top 5 Sub ID 2 by Sales (exclude Organic)
 st.subheader("🏆 Топ 5 Sub ID 2 по продажам (вчера)")
 
 df_y_non_org = df_y[df_y["sub2_norm"] != "Organic"].copy()
@@ -510,28 +547,17 @@ rows = []
 for sub2, s_y in top_sub2_y.items():
     s_p = float(top_sub2_p.get(sub2, 0))
     ch = pct_change(float(s_y), float(s_p))
-    rows.append(
-        {
-            "Sub ID 2": sub2,
-            "Sales (yday)": int(s_y),
-            "Δ% vs prev": None if ch is None else round(ch, 2),
-        }
-    )
+    rows.append({"Sub ID 2": sub2, "Sales (yday)": int(s_y), "Δ% vs prev": ch})
+
 df_tbl = pd.DataFrame(rows)
-
-# форматируем отображение процента
-df_tbl["Δ% vs prev"] = df_tbl["Δ% vs prev"].apply(lambda x: None if x is None else float(x))
-
 sty = (
     df_tbl.style
     .format({"Δ% vs prev": fmt_pct_cell})
     .applymap(style_pct_color, subset=["Δ% vs prev"])
 )
-
 st.dataframe(sty, use_container_width=True)
 
-
-# --- Top 5 Campaign by Sales (campaign_short) ---
+# Top 5 Campaign by Sales (campaign_short)
 st.subheader("🏆 Топ 5 Кампания по продажам (вчера)")
 
 top_c_y = df_y.groupby("campaign_short")["sales"].sum().sort_values(ascending=False).head(5)
@@ -541,27 +567,19 @@ rows = []
 for camp, s_y in top_c_y.items():
     s_p = float(top_c_p.get(camp, 0))
     ch = pct_change(float(s_y), float(s_p))
-    rows.append(
-        {
-            "Campaign": camp,
-            "Sales (yday)": int(s_y),
-            "Δ% vs prev": None if ch is None else round(ch, 2),
-        }
-    )
-df_tbl = pd.DataFrame(rows)
-df_tbl["Δ% vs prev"] = df_tbl["Δ% vs prev"].apply(lambda x: None if x is None else float(x))
+    rows.append({"Campaign": camp, "Sales (yday)": int(s_y), "Δ% vs prev": ch})
 
+df_tbl = pd.DataFrame(rows)
 sty = (
     df_tbl.style
     .format({"Δ% vs prev": fmt_pct_cell})
     .applymap(style_pct_color, subset=["Δ% vs prev"])
 )
-
 st.dataframe(sty, use_container_width=True)
 
 
-# --- Gain helpers ---
-def gain_table(group_col: str, metric_col: str, title: str, top_n: int = 10, exclude_organic: bool = False):
+# ===================== Gainers (% + NEW) =====================
+def gain_table_pct(group_col: str, metric_col: str, title: str, top_n: int = 10, exclude_organic: bool = False):
     st.subheader(title)
 
     a = df_y.copy()
@@ -574,28 +592,80 @@ def gain_table(group_col: str, metric_col: str, title: str, top_n: int = 10, exc
     y = a.groupby(group_col)[metric_col].sum()
     p = b.groupby(group_col)[metric_col].sum()
 
-    out = (y.subtract(p, fill_value=0)).sort_values(ascending=False)
-    out = out[out > 0].head(top_n)
+    idx = y.index.union(p.index)
+    out = pd.DataFrame(
+        {
+            group_col: idx,
+            f"{metric_col} (yday)": y.reindex(idx, fill_value=0).astype(int).values,
+            f"{metric_col} (prev)": p.reindex(idx, fill_value=0).astype(int).values,
+        }
+    )
 
-    rows = []
-    for key, delta in out.items():
-        rows.append(
-            {
-                group_col: key,
-                f"{metric_col} (yday)": int(y.get(key, 0)),
-                f"{metric_col} (prev)": int(p.get(key, 0)),
-                f"Δ {metric_col}": int(delta),
-            }
-        )
+    prev_vals = out[f"{metric_col} (prev)"].astype(float)
+    yday_vals = out[f"{metric_col} (yday)"].astype(float)
 
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    out["Δ% vs prev"] = None
+    mask = prev_vals > 0
+    out.loc[mask, "Δ% vs prev"] = ((yday_vals[mask] - prev_vals[mask]) / prev_vals[mask]) * 100.0
+
+    # только рост
+    out = out[out["Δ% vs prev"].notna()]
+    out = out[out["Δ% vs prev"] > 0]
+
+    # скоринг: % * объём, чтобы не вылетали “+500% от 1”
+    out["_score"] = out["Δ% vs prev"].astype(float) * out[f"{metric_col} (yday)"].astype(float)
+    out = out.sort_values(["_score", f"{metric_col} (yday)"], ascending=False).head(top_n)
+    out = out.drop(columns=["_score"])
+
+    sty = (
+        out.style
+        .format({"Δ% vs prev": fmt_pct_cell})
+        .applymap(style_pct_color, subset=["Δ% vs prev"])
+    )
+    st.dataframe(sty, use_container_width=True)
+
+
+def new_table(group_col: str, metric_col: str, title: str, top_n: int = 10, exclude_organic: bool = False):
+    st.subheader(title)
+
+    a = df_y.copy()
+    b = df_p.copy()
+
+    if exclude_organic and group_col == "sub2_norm":
+        a = a[a["sub2_norm"] != "Organic"]
+        b = b[b["sub2_norm"] != "Organic"]
+
+    y = a.groupby(group_col)[metric_col].sum()
+    p = b.groupby(group_col)[metric_col].sum()
+
+    idx = y.index.union(p.index)
+    out = pd.DataFrame(
+        {
+            group_col: idx,
+            f"{metric_col} (yday)": y.reindex(idx, fill_value=0).astype(int).values,
+            f"{metric_col} (prev)": p.reindex(idx, fill_value=0).astype(int).values,
+        }
+    )
+
+    out = out[(out[f"{metric_col} (yday)"] > 0) & (out[f"{metric_col} (prev)"] == 0)]
+    out = out.sort_values(f"{metric_col} (yday)", ascending=False).head(top_n)
+
+    st.dataframe(out, use_container_width=True)
 
 
 # Traffic gainers (clicks)
-gain_table("sub2_norm", "clicks", "📈 Top 10 Sub ID 2 Traffic Gainers (клики)", exclude_organic=True)
-gain_table("campaign_short", "clicks", "📈 Top 10 Кампания Traffic Gainers (клики)")
+gain_table_pct("sub2_norm", "clicks", "📈 Top 10 Sub ID 2 Traffic Gainers (клики, %)", exclude_organic=True)
+new_table("sub2_norm", "clicks", "🆕 New Sub ID 2 Traffic (prev=0)", exclude_organic=True)
+
+gain_table_pct("campaign_short", "clicks", "📈 Top 10 Кампания Traffic Gainers (клики, %)")
+new_table("campaign_short", "clicks", "🆕 New Кампания Traffic (prev=0)")
 
 # Sales gainers
-gain_table("sub2_norm", "sales", "💰 Top 10 Sub ID 2 Sales Gainers (продажи)", exclude_organic=True)
-gain_table("campaign_short", "sales", "💰 Top 10 Кампания Sales Gainers (продажи)")
-gain_table("offer", "sales", "💰 Top 10 Оффер Sales Gainers (продажи)")
+gain_table_pct("sub2_norm", "sales", "💰 Top 10 Sub ID 2 Sales Gainers (продажи, %)", exclude_organic=True)
+new_table("sub2_norm", "sales", "🆕 New Sub ID 2 Sales (prev=0)", exclude_organic=True)
+
+gain_table_pct("campaign_short", "sales", "💰 Top 10 Кампания Sales Gainers (продажи, %)")
+new_table("campaign_short", "sales", "🆕 New Кампания Sales (prev=0)")
+
+gain_table_pct("offer", "sales", "💰 Top 10 Оффер Sales Gainers (продажи, %)")
+new_table("offer", "sales", "🆕 New Оффер Sales (prev=0)")
