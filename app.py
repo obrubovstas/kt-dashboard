@@ -22,6 +22,29 @@ engine = get_engine()
 
 
 # ===================== Helpers =====================
+def check_password():
+    if "auth_ok" not in st.session_state:
+        st.session_state.auth_ok = False
+
+    if st.session_state.auth_ok:
+        return True
+
+    st.title("🔒 Private dashboard")
+    pwd = st.text_input("Введите пароль", type="password")
+
+    if pwd:
+        if pwd == st.secrets["DASHBOARD_PASSWORD"]:
+            st.session_state.auth_ok = True
+            st.rerun()
+        else:
+            st.error("Неверный пароль")
+
+    return False
+
+
+if not check_password():
+    st.stop()
+
 def pick_col(df: pd.DataFrame, candidates: list[str]) -> str:
     # 1) exact (strip)
     stripped_map = {c.strip(): c for c in df.columns}
