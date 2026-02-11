@@ -484,8 +484,36 @@ with st.sidebar:
 
 
 # ===================== Data for dashboard =====================
-@st.cache_data(ttl=600)  # 10 минут
+@st.cache_data(ttl=600)
 def load_dashboard_df():
+    SQL_DASH = """
+    with keys as (
+      select day, subid from fact_clicks_daily
+      union
+      select day, subid from fact_conversions_daily
+    )
+    select
+      k.day,
+      k.subid,
+      coalesce(c.clicks, 0) as clicks,
+      coalesce(v.leads, 0) as leads,
+      coalesce(v.sales, 0) as sales,
+      d.offer,
+      d.country_flag,
+      d.os,
+      d.sub_id_2,
+      d.campaign,
+      d.sub_id_1
+    from keys k
+    left join fact_clicks_daily c
+      on c.day = k.day and c.subid = k.subid
+    left join fact_conversions_daily v
+      on v.day = k.day and v.subid = k.subid
+    left join dim_subid d
+      on d.subid = k.subid
+    where k.day >= current_date - interval '30 days'
+    order by k.day;
+    """
     return pd.read_sql(SQL_DASH, engine)
 
 df = load_dashboard_df()
