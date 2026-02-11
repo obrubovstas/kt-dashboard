@@ -518,38 +518,6 @@ def load_dashboard_df():
 
 df = load_dashboard_df()
 
-df = pd.read_sql(
-    """
-    with keys as (
-      select day, subid from fact_clicks_daily
-      union
-      select day, subid from fact_conversions_daily
-    )
-    select
-      k.day,
-      k.subid,
-      coalesce(c.clicks, 0) as clicks,
-      coalesce(v.leads, 0) as leads,
-      coalesce(v.sales, 0) as sales,
-      d.offer,
-      d.country_flag,
-      d.os,
-      d.sub_id_2,
-      d.campaign,
-      d.sub_id_1
-    from keys k
-    left join fact_clicks_daily c
-      on c.day = k.day and c.subid = k.subid
-    left join fact_conversions_daily v
-      on v.day = k.day and v.subid = k.subid
-    left join dim_subid d
-      on d.subid = k.subid
-    where k.day >= current_date - interval '30 days'
-    order by k.day;
-    """,
-    engine,
-)
-
 if df.empty:
     st.info("Загрузи CSV файлы — появится дашборд.")
     st.stop()
