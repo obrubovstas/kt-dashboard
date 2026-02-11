@@ -479,9 +479,17 @@ with st.sidebar:
                 st.write("✅ conversions загружены")
 
         st.success("🎉 Данные успешно загружены в БД")
+        st.cache_data.clear()
+        st.rerun()
 
 
 # ===================== Data for dashboard =====================
+@st.cache_data(ttl=600)  # 10 минут
+def load_dashboard_df():
+    return pd.read_sql(SQL_DASH, engine)
+
+df = load_dashboard_df()
+
 df = pd.read_sql(
     """
     with keys as (
@@ -508,6 +516,7 @@ df = pd.read_sql(
       on v.day = k.day and v.subid = k.subid
     left join dim_subid d
       on d.subid = k.subid
+    where k.day >= current_date - interval '30 days'
     order by k.day;
     """,
     engine,
